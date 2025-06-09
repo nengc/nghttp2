@@ -1,0 +1,142 @@
+name: Windows Build and Release
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [published]
+
+env:
+  VCPKG_ROOT: 'C:\vcpkg'
+  ARTIFACT_NAME: nghttp2-windows-build
+  BUILD_DIR: build
+
+jobs:
+  build-windows:
+    strategy:
+      matrix:
+        arch: [x64]  # 支持 x86 或 x64
+        configuration: [Release]  # 支持 Debug 或 Release
+        include:
+        - arch: x64
+          triplet: x64-windows
+          platform: x64
+        - arch: x86
+          triplet: x86-windows
+          platform: Win32
+
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Set up vcpkg
+      run: |
+        choco install vcpkg -y
+        $env:VCPKG_ROOT = "C:\vcpkg"
+        Add-Content $env:GITHUB_ENV "VCPKG_ROOT=C:\vcpkg"
+        Add-Content $env:GITHUB_PATH "$env:VCPKG_ROOT"
+
+    - name: Cache vcpkg packages
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.VCPKG_ROOT }}\installed
+        key: ${{ runner.os }}-vcpkg-${{ matrix.triplet }}-${{ hashFiles('CMakeLists.txt') }}
+
+    - name: Install dependencies
+      run: |
+        vcpkg integrate install
+        vcpkg update
+        vcpkg install openssl zlib libevent libxml2 brotli jansson c-ares --triplet ${{ matrix.triplet }}
+
+    - name: Configure CMake
+      run: |
+        cmake -B $env:BUILD_DIR `
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} `
+          -DCMAKE_BUILD_TYPE=${{ matrix.configuration }} `
+          -DCMAKE_GENERATOR_PLATFORM=${{ matrix.platform }} `
+          -DBUILD_STATIC_LIBS=ON `
+          -DWITH_ASIO=ON `
+          -DWITH_APP=ON `
+          -DWITH_EXAMPLES=ON
+
+    - name: Build project
+      run: |
+        cmake --build $env:BUILD_DIR --config ${{ matrix.configuration }} --target ALL_BUILD
+
+    - name: Run tests
+      run: |
+        cd $env:BUILD_DIR
+        ctest -C ${{ matrix.configuration }} --output-on-failure
+
+    - name: Create artifacts
+      run: |
+        $version = (Get-Content CMakeLists.txt | `
+            Select-String -Pattern "project$.* VERSION (\d+\.\d+\.\d+)$" | `
+            % { $_.Matches.Groups[1].Value })
+
+        if (-not $version) { $version = "unknown" }
+
+        $artifactDir = "nghttp2-$version-${{ matrix.arch }}-${{ matrix.configuration }}"
+        mkdir $artifactDir
+
+        # 复制主要二进制文件
+        Copy-Item -Path $env:BUILD_DIR\${{ matrix.configuration }}\nghttp.exe -Destination $artifactDir\
+        Copy-Item -Path $env:BUILD_DIR\${{ matrix.configuration }}\nghttpd.exe -Destination $artifactDir\
+        Copy-Item -Path $env:BUILD_DIR\${{ matrix.configuration }}\nghttpx.exe -Destination $artifactDir\
+
+        # 复制DLL依赖项
+        Copy-Item -Path $env:VCPKG_ROOT\installed\${{ matrix.triplet }}\bin\*.dll -Destination $artifactDir\
+
+        # 创建压缩包
+        Compress-Archive -Path $artifactDir -DestinationPath "$artifactDir.zip"
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: nghttp2-${{ matrix.arch }}-${{ matrix.configuration }}
+        path: |
+          nghttp2-*-${{ matrix.arch }}-${{ matrix.configuration }}.zip
+        retention-days: 7
+
+  create-release:
+    needs: build-windows
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+
+    - name: Create release package
+      run: |
+        $releaseFiles = Get-ChildItem -Path artifacts -Recurse -Filter "*.zip"
+        foreach ($file in $releaseFiles) {
+          Copy-Item $file.FullName -Destination release_files
+        }
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        name: "Windows Build - ${{ github.ref_name }}"
+        tag_name: ${{ github.ref_name }}
+        body: |
+          Pre-built Windows binaries for ${{ github.ref_name }}
+          Includes:
+          - nghttp.exe
+          - nhttpd.exe
+          - nghttpx.exe
+        files: |
+          release_files/*.zip
+        draft: false
+        prerelease: false
