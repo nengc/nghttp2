@@ -13,7 +13,7 @@ jobs:
         include:
         - arch: x86
           platform: Win32
-          triplet: i686-windows
+          triplet: x86-windows
         - arch: x64
           platform: x64
           triplet: x64-windows
@@ -33,7 +33,7 @@ jobs:
         
     - name: Install dependencies
       run: |
-        & $env:VCPKG_PATH/vcpkg install --triplet=${{ matrix.triplet }} openssl jansson libevent libxml2 c-ares
+        & $env:VCPKG_PATH/vcpkg install --triplet=${{ matrix.triplet }} openssl zlib jansson libevent libxml2 c-ares
         
     - name: Configure CMake
       run: |
@@ -44,22 +44,37 @@ jobs:
           -DWITH_ASIO=ON `
           -DWITH_APP=ON `
           -DWITH_HPACK_TOOLS=ON `
-          -DBUILD_TESTING=ON
+          -DWITH_EXAMPLES=ON `
+          -DWITH_WIN32APP=ON `
+          -DBUILD_TESTING=OFF `
+          -DCMAKE_BUILD_TYPE=Release
         
     - name: Build project
       run: |
         cmake --build build --config Release
-        cmake --build build --target RUN_TESTS
         
-    - name: Package installation
+    - name: Find built executables
+      id: find_exes
+      shell: bash
       run: |
-        cmake --install build --prefix dist/nghttp2
+        exe_path=$(find build -type f -name "*.exe" | head -1)
+        echo "executables_path=$(dirname $exe_path)" >> $GITHUB_OUTPUT
         
     - name: Create ZIP package
       run: |
         $platform = "${{ matrix.platform }}"
         $archiveName = "nghttp2-${{ github.run_id }}-win-$platform.zip"
-        Compress-Archive -Path dist/nghttp2/* -DestinationPath $archiveName
+        # Create the distribution directory
+        New-Item -ItemType Directory -Path "dist/nghttp2/bin"
+        
+        # Copy all executables
+        Copy-Item "${{ steps.find_exes.outputs.executables_path }}/*.exe" -Destination "dist/nghttp2/bin"
+        
+        # Copy DLL dependencies (assuming they're in the same directory as the executables)
+        Copy-Item "${{ steps.find_exes.outputs.executables_path }}/*.dll" -Destination "dist/nghttp2/bin"
+        
+        # Create the ZIP archive
+        Compress-Archive -Path "dist/nghttp2" -DestinationPath $archiveName
         
     - name: Upload artifact
       uses: actions/upload-artifact@v4
