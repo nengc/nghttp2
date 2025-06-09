@@ -1,15 +1,16 @@
-name: Windows Build and Release
+name: build-windows
 
-on:
-  push:
-    branches: [master]
-  pull_request:
-    branches: [master]
-  release:
-    types: [published]
+on: [push, pull_request]
 
 env:
-  BUILD_DIR: build
+  LIBBPF_VERSION: v1.5.1
+  OPENSSL1_VERSION: 1_1_1w+quic
+  OPENSSL3_VERSION: 3.5.0
+  BORINGSSL_VERSION: 9295969e1dad2c31d0d99481734c1c68dcbc6403
+  AWSLC_VERSION: v1.52.0
+  NGHTTP3_VERSION: v1.10.1
+  NGTCP2_VERSION: v1.13.0
+  WOLFSSL_VERSION: v5.8.0-stable
 
 jobs:
   build-windows:
@@ -19,142 +20,30 @@ jobs:
         include:
         - arch: x86
           platform: Win32
-          triplet: x86-windows-static
         - arch: x64
           platform: x64
-          triplet: x64-windows-static
-      fail-fast: false
 
     runs-on: windows-latest
 
     steps:
-    - name: Checkout code
+    - name: Checkout
       uses: actions/checkout@v4
       with:
         submodules: recursive
-        fetch-depth: 0
-
-    - name: Setup vcpkg
-      uses: microsoft/setup-vcpkg@v4
-      with:
-        vcpkgDirectory: 'C:/vcpkg'
-
-    - name: Restore vcpkg cache
-      id: vcpkg-cache
-      uses: actions/cache@v4
-      with:
-        path: C:/vcpkg/installed
-        key: ${{ runner.os }}-vcpkg-${{ matrix.triplet }}-${{ hashFiles('CMakeLists.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-vcpkg-${{ matrix.triplet }}
-
-    - name: Install dependencies via vcpkg
-      if: steps.vcpkg-cache.outputs.cache-hit != 'true'
-      run: |
-        vcpkg install \
-          openssl \
-          zlib \
-          libevent \
-          libxml2 \
-          brotli \
-          jansson \
-          c-ares \
-          --triplet ${{ matrix.triplet }}
-
-    - name: Configure CMake
-      run: |
-        cmake -B $env:BUILD_DIR `
-          -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
-          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} `
-          -DCMAKE_GENERATOR_PLATFORM=${{ matrix.platform }} `
-          -DBUILD_STATIC_LIBS=ON `
-          -DBUILD_TESTING=ON `
-          -DWITH_ASIO=ON `
-          -DWITH_APP=ON `
-          -DCMAKE_BUILD_TYPE=Release
-
+    - uses: microsoft/setup-msbuild@v2
+    - name: Configure cmake
+      run: cmake -B build -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DCMAKE_GENERATOR_PLATFORM=${{ matrix.platform }} -DVCPKG_TARGET_TRIPLET=${{ matrix.arch}}-windows -DBUILD_STATIC_LIBS=ON -DBUILD_TESTING=ON
     - name: Build nghttp2
       run: |
-        cmake --build $env:BUILD_DIR --config Release
-        cmake --build $env:BUILD_DIR --target check
-
-    - name: Extract version information
+        cmake --build build
+        cmake --build build --target install
+    - name: Create install package
       run: |
-        $version = (Get-Content CMakeLists.txt | `
-            Select-String -Pattern "project$.* VERSION (\d+\.\d+\.\d+)$" | `
-            ForEach-Object { $_.Matches.Groups[1].Value })
-        if (-not $version) { $version = "unknown" }
-        Write-Output "VERSION=$version" >> $env:GITHUB_ENV
-
-    - name: Create binaries package
-      run: |
-        $pkgDir = "nghttp2-$env:VERSION-${{ matrix.arch }}"
-        New-Item -ItemType Directory -Path $pkgDir -Force
-        
-        # 复制可执行文件
-        $files = @(
-            "$env:BUILD_DIR\src\Release\nghttp.exe",
-            "$env:BUILD_DIR\src\Release\nghttpd.exe",
-            "$env:BUILD_DIR\src\Release\nghttpx.exe"
-        )
-        foreach ($file in $files) {
-            if (Test-Path $file) {
-                Copy-Item $file $pkgDir
-            }
-        }
-        
-        # 压缩包
-        Compress-Archive -Path $pkgDir -DestinationPath "$pkgDir.zip"
-
-    - name: Upload artifacts
+        $platform = "${{ matrix.platform }}"
+        $archiveName = "nghttp2-${{ github.run_id }}-win-$platform.zip"
+        Compress-Archive -Path build/* -DestinationPath $archiveName
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: nghttp2-windows-${{ matrix.arch }}
-        path: |
-          nhttp2-*-${{ matrix.arch }}.zip
-        retention-days: 7
-
-  create-release:
-    if: github.event_name == 'release' && github.event.action == 'published'
-    needs: build-windows
-    runs-on: windows-latest
-    permissions:
-      contents: write
-
-    steps:
-    - name: Download artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: artifacts
-
-    - name: Collect release assets
-      run: |
-        $releaseDir = "release-assets"
-        New-Item -ItemType Directory -Path $releaseDir
-        
-        # 将所有构建产物集中到一个目录
-        Get-ChildItem artifacts -Filter "*.zip" | ForEach-Object {
-            Copy-Item $_.FullName $releaseDir
-        }
-        
-        # 生成版本信息
-        $ver = '${{ github.ref_name }}'
-        $note = "Precompiled Windows binaries for nghttp2 $ver"
-        Set-Content -Path "$releaseDir\README.txt" -Value $note
-
-    - name: Create GitHub release
-      uses: softprops/action-gh-release@v2
-      with:
-        name: "Windows Build - ${{ github.ref_name }}"
-        tag_name: ${{ github.ref_name }}
-        body: |
-          Pre-built Windows binaries for ${{ github.ref_name }}
-          
-          This release contains:
-          - nghttp.exe - HTTP/2 client
-          - nhttpd.exe - HTTP/2 server
-          - nghttpx.exe - HTTP/2 proxy
-        files: |
-          release-assets/*
-        draft: false
-        prerelease: false
+        name: windows-installer-${{ matrix.platform }}
+        path: ${{ github.workspace }}\*.zip
