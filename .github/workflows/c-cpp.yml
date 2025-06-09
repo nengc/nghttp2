@@ -35,7 +35,7 @@ jobs:
         fetch-depth: 0
 
     - name: Setup vcpkg
-      uses: microsoft/setup-vcpkg@v3
+      uses: microsoft/setup-vcpkg@v4
       with:
         vcpkgDirectory: 'C:/vcpkg'
 
