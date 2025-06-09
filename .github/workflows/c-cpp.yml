@@ -3,14 +3,7 @@ name: build-windows
 on: [push, pull_request]
 
 env:
-  LIBBPF_VERSION: v1.5.1
-  OPENSSL1_VERSION: 1_1_1w+quic
-  OPENSSL3_VERSION: 3.5.0
-  BORINGSSL_VERSION: 9295969e1dad2c31d0d99481734c1c68dcbc6403
-  AWSLC_VERSION: v1.52.0
-  NGHTTP3_VERSION: v1.10.1
-  NGTCP2_VERSION: v1.13.0
-  WOLFSSL_VERSION: v5.8.0-stable
+  VCPKG_PATH: C:/vcpkg
 
 jobs:
   build-windows:
@@ -20,30 +13,56 @@ jobs:
         include:
         - arch: x86
           platform: Win32
+          triplet: i686-windows
         - arch: x64
           platform: x64
+          triplet: x64-windows
 
     runs-on: windows-latest
 
     steps:
-    - name: Checkout
+    - name: Checkout repository
       uses: actions/checkout@v4
       with:
         submodules: recursive
-    - uses: microsoft/setup-msbuild@v2
-    - name: Configure cmake
-      run: cmake -B build -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DCMAKE_GENERATOR_PLATFORM=${{ matrix.platform }} -DVCPKG_TARGET_TRIPLET=${{ matrix.arch}}-windows -DBUILD_STATIC_LIBS=ON -DBUILD_TESTING=ON
-    - name: Build nghttp2
+        
+    - name: Setup vcpkg
       run: |
-        cmake --build build
-        cmake --build build --target install
-    - name: Create install package
+        git clone https://github.com/Microsoft/vcpkg.git $env:VCPKG_PATH
+        & $env:VCPKG_PATH/bootstrap-vcpkg.bat
+        
+    - name: Install dependencies
+      run: |
+        & $env:VCPKG_PATH/vcpkg install --triplet=${{ matrix.triplet }} openssl jansson libevent libxml2 c-ares
+        
+    - name: Configure CMake
+      run: |
+        cmake -B build `
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_PATH/scripts/buildsystems/vcpkg.cmake" `
+          -DCMAKE_GENERATOR_PLATFORM=${{ matrix.platform }} `
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} `
+          -DWITH_ASIO=ON `
+          -DWITH_APP=ON `
+          -DWITH_HPACK_TOOLS=ON `
+          -DBUILD_TESTING=ON
+        
+    - name: Build project
+      run: |
+        cmake --build build --config Release
+        cmake --build build --target RUN_TESTS
+        
+    - name: Package installation
+      run: |
+        cmake --install build --prefix dist/nghttp2
+        
+    - name: Create ZIP package
       run: |
         $platform = "${{ matrix.platform }}"
         $archiveName = "nghttp2-${{ github.run_id }}-win-$platform.zip"
-        Compress-Archive -Path build/* -DestinationPath $archiveName
+        Compress-Archive -Path dist/nghttp2/* -DestinationPath $archiveName
+        
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: windows-installer-${{ matrix.platform }}
-        path: ${{ github.workspace }}\*.zip
+        path: ${{ github.workspace }}\$archiveName
